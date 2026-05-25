@@ -1,5 +1,5 @@
 import { TILE_W, TILE_H, TILE_THICK, buildAssets } from './art.js';
-import { getTileKind, getNodeAt, getFeatureAt, getPlacedAt } from './world.js';
+import { getTileKind, getNodeAt, getFeatureAt, getPlacedAt, isForest } from './world.js';
 
 export function gridToScreen(gx, gy) {
   return {
@@ -27,6 +27,7 @@ export class Renderer {
     this.camera = { x: 0, y: 0, zoom: DEFAULT_ZOOM };
     this.dpr = 1;
     this.particles = [];
+    this.shakeMap = new Map(); // "x,y" -> ms timestamp when shake ends
     this._resize();
     window.addEventListener('resize', () => this._resize());
     canvas.addEventListener('wheel', (e) => {
@@ -62,6 +63,10 @@ export class Renderer {
   pickTile(px, py) {
     const g = this.screenToWorld(px, py);
     return { x: Math.floor(g.x), y: Math.floor(g.y) };
+  }
+
+  shakeAt(x, y, duration = 220) {
+    this.shakeMap.set(`${x},${y}`, performance.now() + duration);
   }
 
   addParticles(x, y, color, count = 8) {
@@ -148,6 +153,12 @@ export class Renderer {
         }
       }
     }
+    // Ground drops anywhere in view.
+    for (const d of (world.drops || [])) {
+      if (d.x >= minX - 1 && d.x <= maxX + 1 && d.y >= minY - 1 && d.y <= maxY + 1) {
+        items.push({ depth: d.x + d.y + 0.45, type: 'drop', drop: d });
+      }
+    }
     for (const id in players) {
       const p = players[id];
       if (p.x >= minX - 2 && p.x <= maxX + 2 && p.y >= minY - 2 && p.y <= maxY + 2) {
@@ -162,6 +173,7 @@ export class Renderer {
       else if (it.type === 'placed') this._drawObject(it.placed.x,  it.placed.y,  it.placed.key, z);
       else if (it.type === 'shrine') this._drawObject(it.x, it.y, 'shrine', z, it.active);
       else if (it.type === 'puzzle') this._drawObject(it.x, it.y, it.sub, z);
+      else if (it.type === 'drop')   this._drawDrop(it.drop, z);
       else if (it.type === 'player') this._drawPlayer(it.player, z);
     }
 
@@ -221,11 +233,55 @@ export class Renderer {
       ctx.fill();
       ctx.restore();
     }
+    // Shake offset (used for chopping trees, knocking switches, etc.)
+    let offX = 0;
+    const shakeUntil = this.shakeMap.get(`${gx},${gy}`);
+    if (shakeUntil !== undefined) {
+      const remaining = shakeUntil - performance.now();
+      if (remaining > 0) {
+        const amp = Math.min(1, remaining / 220);
+        offX = (Math.random() - 0.5) * 6 * z * amp;
+      } else {
+        this.shakeMap.delete(`${gx},${gy}`);
+      }
+    }
     ctx.drawImage(img,
-      Math.round(s.x - dw / 2),
+      Math.round(s.x - dw / 2 + offX),
       Math.round(s.y - dh + (TILE_H / 2) * z),
       dw, dh
     );
+  }
+
+  _drawDrop(drop, z) {
+    const ctx = this.ctx;
+    const spriteKey = drop.key === 'wood' ? 'log' : (this.assets.objects[drop.key] ? drop.key : 'log');
+    const img = this.assets.objects[spriteKey];
+    if (!img) return;
+    const bob = Math.sin(performance.now() / 280 + (drop.x + drop.y)) * 2;
+    const s = this.worldToScreen(drop.x + 0.5, drop.y + 0.5);
+    const dw = img.width * z, dh = img.height * z;
+    // Pickup sparkle (subtle).
+    ctx.save();
+    ctx.globalAlpha = 0.18 + Math.sin(performance.now() / 220 + drop.x) * 0.06;
+    ctx.fillStyle = '#ffd479';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 10 * z, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Anchor sprite bottom to tile surface, then add a small bob.
+    ctx.drawImage(img,
+      Math.round(s.x - dw / 2),
+      Math.round(s.y - dh + (TILE_H / 2) * z + bob * z),
+      dw, dh
+    );
+    if (drop.qty > 1) {
+      ctx.font = `${Math.max(10, 9 * z)}px PixelMono, monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#000';
+      ctx.fillText(`x${drop.qty}`, s.x + 1, s.y - 4 * z + 1);
+      ctx.fillStyle = '#ffd479';
+      ctx.fillText(`x${drop.qty}`, s.x, s.y - 4 * z);
+    }
   }
 
   _drawPlayer(p, z) {
@@ -275,7 +331,9 @@ export class Renderer {
       for (let dx = -radius; dx <= radius; dx++) {
         const x = px + dx, y = py + dy;
         const t = getTileKind(world, x, y);
-        ctx.fillStyle = COLORS[t] || '#222';
+        let color = COLORS[t] || '#222';
+        if (t === 'grass' && isForest(world, x, y)) color = '#2a5b1f';
+        ctx.fillStyle = color;
         ctx.fillRect(ox + (dx + radius) * cell, oy + (dy + radius) * cell, cell, cell);
         const placed = getPlacedAt(world, x, y);
         if (placed) {
@@ -289,6 +347,13 @@ export class Renderer {
           }
         }
       }
+    }
+    // Drops as small yellow markers.
+    for (const d of (world.drops || [])) {
+      const ddx = Math.round(d.x) - px, ddy = Math.round(d.y) - py;
+      if (Math.abs(ddx) > radius || Math.abs(ddy) > radius) continue;
+      ctx.fillStyle = '#ffd479';
+      ctx.fillRect(ox + (ddx + radius) * cell, oy + (ddy + radius) * cell, cell, cell);
     }
     // Player markers
     for (const id in players) {

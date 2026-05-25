@@ -192,21 +192,109 @@ export function makeObject(kind) {
 
   switch (kind) {
     case 'tree': {
-      // trunk
-      ctx.fillStyle = PALETTE.wood1;
-      ctx.fillRect(20, 40, 8, 20);
-      ctx.fillStyle = PALETTE.wood2;
-      ctx.fillRect(20, 40, 2, 20);
-      // leaves
-      ctx.fillStyle = PALETTE.leaf2;
-      ctx.fillRect(10, 14, 28, 22);
-      ctx.fillStyle = PALETTE.leaf1;
-      ctx.fillRect(12, 30, 24, 6);
-      ctx.fillRect(8,  20, 4, 10);
-      ctx.fillRect(36, 20, 4, 10);
-      ctx.fillStyle = '#7fc25c';
-      ctx.fillRect(14, 16, 4, 4);
-      ctx.fillRect(24, 12, 4, 4);
+      // Chibi tree inspired by classic pixel-art: rounded canopy with dark
+      // outline, mottled greens, brown trunk with grain, base shadow.
+      const C_OUTLINE = '#1a2e0e';
+      const C_DARK    = '#2d5e1c';
+      const C_MID     = '#4f9c3b';
+      const C_HI      = '#7fc25c';
+      const T_OUTLINE = '#1a0e06';
+      const T_MAIN    = '#7a4a26';
+      const T_HI      = '#a4683a';
+      const T_DARK    = '#5a3418';
+
+      // Trunk (drawn first so canopy overlaps top of it)
+      ctx.fillStyle = T_OUTLINE;
+      ctx.fillRect(18, 36, 12, 24);
+      ctx.fillStyle = T_MAIN;
+      ctx.fillRect(20, 36, 8, 22);
+      ctx.fillStyle = T_HI;
+      ctx.fillRect(21, 38, 2, 18);
+      ctx.fillStyle = T_DARK;
+      ctx.fillRect(26, 38, 1, 18);
+      // base "feet"
+      ctx.fillStyle = T_OUTLINE;
+      ctx.fillRect(14, 58, 20, 4);
+      ctx.fillStyle = T_DARK;
+      ctx.fillRect(16, 58, 16, 2);
+
+      // Canopy rows: { y, x, w } in 2-pixel bands.
+      const canopy = [
+        { y: 2,  x: 18, w: 12 },
+        { y: 4,  x: 14, w: 20 },
+        { y: 6,  x: 12, w: 24 },
+        { y: 8,  x: 10, w: 28 },
+        { y: 10, x: 8,  w: 32 },
+        { y: 12, x: 8,  w: 32 },
+        { y: 14, x: 6,  w: 36 },
+        { y: 16, x: 6,  w: 36 },
+        { y: 18, x: 6,  w: 36 },
+        { y: 20, x: 6,  w: 36 },
+        { y: 22, x: 8,  w: 32 },
+        { y: 24, x: 8,  w: 32 },
+        { y: 26, x: 10, w: 28 },
+        { y: 28, x: 12, w: 24 },
+        { y: 30, x: 14, w: 20 },
+        { y: 32, x: 16, w: 16 },
+        { y: 34, x: 18, w: 12 },
+      ];
+
+      // Outline: paint a slightly larger "halo" version first.
+      ctx.fillStyle = C_OUTLINE;
+      for (const r of canopy) ctx.fillRect(r.x - 2, r.y, r.w + 4, 2);
+      // Top and bottom caps
+      ctx.fillRect(canopy[0].x, canopy[0].y - 2, canopy[0].w, 2);
+      const last = canopy[canopy.length - 1];
+      ctx.fillRect(last.x, last.y + 2, last.w, 2);
+
+      // Fill mid green
+      ctx.fillStyle = C_MID;
+      for (const r of canopy) ctx.fillRect(r.x, r.y, r.w, 2);
+
+      // Inner darker patches
+      ctx.fillStyle = C_DARK;
+      ctx.fillRect(10, 18, 6, 2);
+      ctx.fillRect(22, 14, 6, 2);
+      ctx.fillRect(28, 22, 6, 2);
+      ctx.fillRect(14, 26, 8, 2);
+      ctx.fillRect(26, 28, 4, 2);
+
+      // Highlights (lighter mottle)
+      ctx.fillStyle = C_HI;
+      ctx.fillRect(14, 8,  4, 2);
+      ctx.fillRect(20, 6,  2, 2);
+      ctx.fillRect(24, 10, 4, 2);
+      ctx.fillRect(16, 14, 2, 2);
+      ctx.fillRect(28, 16, 4, 2);
+      ctx.fillRect(22, 18, 2, 2);
+      ctx.fillRect(34, 20, 2, 2);
+      ctx.fillRect(12, 22, 2, 2);
+      ctx.fillRect(18, 24, 2, 2);
+      ctx.fillRect(30, 26, 2, 2);
+      break;
+    }
+    case 'log': {
+      // Lying log seen front-on with visible end rings.
+      ctx.fillStyle = '#1a0e06';
+      ctx.fillRect(8,  46, 32, 14);
+      ctx.fillStyle = '#7a4a26';
+      ctx.fillRect(10, 48, 28, 10);
+      ctx.fillStyle = '#a4683a';
+      ctx.fillRect(10, 48, 28, 2);
+      ctx.fillStyle = '#5a3418';
+      ctx.fillRect(12, 52, 2, 2);
+      ctx.fillRect(20, 54, 2, 2);
+      ctx.fillRect(28, 52, 2, 2);
+      // end caps with growth rings
+      ctx.fillStyle = '#1a0e06';
+      ctx.fillRect(8,  48, 2, 10);
+      ctx.fillRect(38, 48, 2, 10);
+      ctx.fillStyle = '#a4683a';
+      ctx.fillRect(10, 50, 2, 6);
+      ctx.fillRect(36, 50, 2, 6);
+      ctx.fillStyle = '#7a4a26';
+      ctx.fillRect(10, 52, 2, 2);
+      ctx.fillRect(36, 52, 2, 2);
       break;
     }
     case 'rock': {
@@ -422,7 +510,7 @@ let _assets = null;
 export function buildAssets() {
   if (_assets) return _assets;
   const tileKinds = ['grass','dirt','stone','sand','water','ruin','cave','planks','stone_tile'];
-  const objKinds  = ['tree','rock','crystal','plant','mineral','shrine','lantern','wood_door','flower_pot','pressure_plate','switch'];
+  const objKinds  = ['tree','log','rock','crystal','plant','mineral','shrine','lantern','wood_door','flower_pot','pressure_plate','switch'];
   const tiles = {}; for (const k of tileKinds) tiles[k] = makeTile(k);
   const objects = {}; for (const k of objKinds) objects[k] = makeObject(k);
   const avatar = makeAvatar();

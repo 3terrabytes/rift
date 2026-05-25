@@ -37,8 +37,8 @@ router.get('/export/:worldId', async (req, res) => {
   const wRows = await sql`SELECT id, name, seed, owner_id, created_at, updated_at FROM worlds WHERE id = ${worldId}`;
   const world = wRows[0];
   if (!world) return res.status(404).json({ error: 'world not found' });
-  const sRows = await sql`SELECT terrain, placed, puzzles, shrines, unlocks, removed_nodes FROM world_state WHERE world_id = ${worldId}`;
-  const state = sRows[0] || { terrain: {}, placed: [], puzzles: {}, shrines: {}, unlocks: [], removed_nodes: [] };
+  const sRows = await sql`SELECT terrain, placed, puzzles, shrines, unlocks, removed_nodes, drops FROM world_state WHERE world_id = ${worldId}`;
+  const state = sRows[0] || { terrain: {}, placed: [], puzzles: {}, shrines: {}, unlocks: [], removed_nodes: [], drops: [] };
   const pRows = await sql`
     SELECT u.username, p.role
     FROM world_permissions p JOIN users u ON u.id = p.user_id
@@ -127,7 +127,7 @@ router.post('/import', async (req, res) => {
     // Restore world_state.
     const st = snap.state || {};
     await sql`
-      INSERT INTO world_state (world_id, terrain, placed, puzzles, shrines, unlocks, removed_nodes)
+      INSERT INTO world_state (world_id, terrain, placed, puzzles, shrines, unlocks, removed_nodes, drops)
       VALUES (
         ${worldId},
         ${JSON.stringify(st.terrain || {})}::jsonb,
@@ -135,7 +135,8 @@ router.post('/import', async (req, res) => {
         ${JSON.stringify(st.puzzles || {})}::jsonb,
         ${JSON.stringify(st.shrines || {})}::jsonb,
         ${JSON.stringify(st.unlocks || [])}::jsonb,
-        ${JSON.stringify(st.removed_nodes || [])}::jsonb
+        ${JSON.stringify(st.removed_nodes || [])}::jsonb,
+        ${JSON.stringify(st.drops || [])}::jsonb
       )
       ON CONFLICT (world_id) DO UPDATE SET
         terrain       = EXCLUDED.terrain,
@@ -144,6 +145,7 @@ router.post('/import', async (req, res) => {
         shrines       = EXCLUDED.shrines,
         unlocks       = EXCLUDED.unlocks,
         removed_nodes = EXCLUDED.removed_nodes,
+        drops         = EXCLUDED.drops,
         updated_at = NOW()
     `;
 

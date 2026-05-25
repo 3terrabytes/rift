@@ -53,7 +53,16 @@ export function createWorld(seed, overlays = {}) {
     unlocks:       Array.isArray(overlays.unlocks) ? overlays.unlocks : [],
     // Gathered node positions (Set of "x,y"). Stored as array in world_state.removed_nodes.
     removed:       new Set(Array.isArray(overlays.removed_nodes) ? overlays.removed_nodes : []),
+    // Items lying on the ground waiting to be picked up.
+    drops:         Array.isArray(overlays.drops) ? overlays.drops : [],
   };
+}
+
+// True if this grass tile is part of a dense forest zone.
+export function isForest(world, x, y) {
+  // Slower-varying noise so forests are big contiguous regions.
+  const f = fractalNoise(world.seed, x, y, 555555);
+  return f > 0.56;
 }
 
 // Lookup overlay for placed/removed at a tile (fast index for hot paths).
@@ -103,8 +112,17 @@ export function getNodeAt(world, x, y) {
   if (getPlacedAt(world, x, y)) return null; // built object takes priority
   const t = getTileKind(world, x, y);
   const h = unit(world.seed, x, y, 31337);
-  if (t === 'grass' && h < 0.05) return { x, y, key: 'tree',     resource: 'wood' };
-  if (t === 'grass' && h < 0.10) return { x, y, key: 'plant',    resource: 'plant' };
+  if (t === 'grass') {
+    const inForest = isForest(world, x, y);
+    if (inForest) {
+      if (h < 0.30) return { x, y, key: 'tree',  resource: 'wood' };
+      if (h < 0.42) return { x, y, key: 'plant', resource: 'plant' };
+      return null;
+    }
+    if (h < 0.05) return { x, y, key: 'tree',  resource: 'wood' };
+    if (h < 0.10) return { x, y, key: 'plant', resource: 'plant' };
+    return null;
+  }
   if (t === 'dirt'  && h < 0.04) return { x, y, key: 'plant',    resource: 'plant' };
   if (t === 'stone' && h < 0.14) return { x, y, key: 'rock',     resource: 'stone' };
   if (t === 'stone' && h < 0.18) return { x, y, key: 'mineral',  resource: 'mineral' };
@@ -167,5 +185,6 @@ export function snapshotState(world) {
     puzzles:       world.puzzles,
     unlocks:       world.unlocks,
     removed_nodes: [...world.removed],
+    drops:         world.drops,
   };
 }

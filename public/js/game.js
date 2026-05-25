@@ -41,9 +41,13 @@ export class Game {
     this.running = false;
     this.heldKeys = new Set();
     this._lastFootstepTs = 0;
+    this._lastPickupTs = 0;
+    this.treeHits = new Map(); // "x,y" -> int hits dealt this session
     this._installInput();
     this._installNetwork();
   }
+
+  static TREE_HP = 3;
 
   _installInput() {
     addEventListener('keydown', (e) => {
@@ -130,6 +134,25 @@ export class Game {
       case 'gather': {
         this.world.removed.add(`${msg.node.x},${msg.node.y}`);
         this.renderer.addParticles(msg.node.x + 0.5, msg.node.y + 0.5, this._particleColor(msg.node.key));
+        break;
+      }
+      case 'chop': {
+        // Remote chop: only show feedback. Local hit count is per-player so a
+        // chopper's progress can't be desynced by other players' hits.
+        this.renderer.shakeAt(msg.x, msg.y);
+        this.renderer.addParticles(msg.x + 0.5, msg.y + 0.5, '#5ea142', 4);
+        break;
+      }
+      case 'drop': {
+        // Merge stack if same key on same tile, else push new.
+        const d = msg.drop;
+        const existing = this.world.drops.find(x => x.x === d.x && x.y === d.y && x.key === d.key);
+        if (existing) existing.qty += d.qty;
+        else this.world.drops.push({ ...d });
+        break;
+      }
+      case 'pickup': {
+        this.world.drops = this.world.drops.filter(d => !(d.x === msg.x && d.y === msg.y && d.key === msg.key));
         break;
       }
       case 'puzzle': {
@@ -269,6 +292,9 @@ export class Game {
       }
     }
 
+    // Walk-over pickup of ground drops.
+    this._checkPickups(ts);
+
     // Auto-save every 20 s.
     if (this.localPlayer && ts - this.lastSavedAt > 20000) {
       this.lastSavedAt = ts;
@@ -335,6 +361,65 @@ export class Game {
     });
   }
 
+  _punchTree(x, y) {
+    if (!this.localPlayer || !this.world) return;
+    const k = `${x},${y}`;
+    const hits = (this.treeHits.get(k) || 0) + 1;
+    this.treeHits.set(k, hits);
+    this.network.send({ t: 'chop', x, y });
+    this.renderer.shakeAt(x, y);
+    this.renderer.addParticles(x + 0.5, y + 0.5, '#5ea142', 6);
+    this.localPlayer.anim = 'interact';
+    this.network.send({ t: 'emote', emote: 'chop' });
+    setTimeout(() => { if (this.localPlayer) this.localPlayer.anim = 'idle'; }, 240);
+
+    if (hits >= Game.TREE_HP) {
+      this.treeHits.delete(k);
+      this.world.removed.add(k);
+      this.network.send({ t: 'gather', node: { x, y, key: 'tree' } });
+      this._dropAt(x, y, 'wood', 1);
+      this.ui.chatLine('Tree felled. Wood dropped.', 'sys');
+    }
+  }
+
+  _dropAt(x, y, key, qty) {
+    const existing = this.world.drops.find(d => d.x === x && d.y === y && d.key === key);
+    if (existing) {
+      existing.qty += qty;
+    } else {
+      this.world.drops.push({ x, y, key, qty });
+    }
+    this.network.send({ t: 'drop', drop: { x, y, key, qty } });
+  }
+
+  async _pickupDrop(drop) {
+    if (drop._claimed) return;
+    drop._claimed = true;
+    this.world.drops = this.world.drops.filter(d => d !== drop);
+    this.network.send({ t: 'pickup', x: drop.x, y: drop.y, key: drop.key });
+    try {
+      await API.addInv(drop.key, drop.qty);
+      await this._refreshInventory();
+    } catch {}
+    this.renderer.addParticles(drop.x + 0.5, drop.y + 0.5, '#ffd479', 6);
+    this.ui.chatLine(`Picked up ${drop.qty} ${drop.key}.`, 'sys');
+  }
+
+  _checkPickups(ts) {
+    if (!this.localPlayer || !this.world.drops.length) return;
+    if (ts - this._lastPickupTs < 90) return;
+    this._lastPickupTs = ts;
+    const px = this.localPlayer.x, py = this.localPlayer.y;
+    // Take a snapshot — _pickupDrop mutates the array.
+    for (const drop of this.world.drops.slice()) {
+      const dx = (drop.x + 0.5) - px;
+      const dy = (drop.y + 0.5) - py;
+      if (dx * dx + dy * dy < 0.36) { // 0.6 tile radius
+        this._pickupDrop(drop);
+      }
+    }
+  }
+
   _particleColor(key) {
     return ({
       tree: '#5ea142', plant: '#7fc25c', rock: '#a1a8b6',
@@ -359,6 +444,10 @@ export class Game {
     for (const { tx, ty } of candidates) {
       const node = getNodeAt(this.world, tx, ty);
       if (node) {
+        if (node.key === 'tree') {
+          this._punchTree(tx, ty);
+          return;
+        }
         await API.addInv(node.resource, 1);
         this.world.removed.add(`${tx},${ty}`);
         this.network.send({ t: 'gather', node });
