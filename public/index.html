@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Rift</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Login / Register screen -->
+  <section id="auth-screen" class="screen active">
+    <div class="auth-card">
+      <div class="brand">
+        <img src="/assets/logo-wordmark.svg" alt="Rift" class="brand-logo" />
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-tab="login">Sign in</button>
+        <button class="tab" data-tab="register">Create account</button>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <label>Username<input name="username" autocomplete="username" required /></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required /></label>
+        <button type="submit" class="px-btn primary">Enter the Rift</button>
+        <button type="button" id="open-reset" class="px-link">Forgot password</button>
+      </form>
+
+      <form id="register-form" class="auth-form hidden">
+        <label>Username<input name="username" required minlength="3" /></label>
+        <label>Email<input name="email" type="email" required /></label>
+        <label>Password<input name="password" type="password" required minlength="6" /></label>
+        <button type="submit" class="px-btn primary">Create account</button>
+      </form>
+
+      <form id="reset-form" class="auth-form hidden">
+        <label>Email<input name="email" type="email" required /></label>
+        <button type="submit" class="px-btn">Request reset</button>
+        <div id="reset-token-line" class="hint hidden"></div>
+        <hr />
+        <label>Reset token<input name="token" /></label>
+        <label>New password<input name="password" type="password" minlength="6" /></label>
+        <button type="button" id="confirm-reset" class="px-btn">Confirm reset</button>
+      </form>
+
+      <div id="auth-error" class="error"></div>
+    </div>
+  </section>
+
+  <!-- World select screen -->
+  <section id="worlds-screen" class="screen">
+    <div class="world-list-shell">
+      <header class="topbar">
+        <div class="brand-mini">
+          <img src="/assets/logo-wordmark.svg" alt="Rift" />
+        </div>
+        <div class="who"><span id="who-username"></span>
+          <button id="logout-btn" class="px-link">Sign out</button>
+        </div>
+      </header>
+
+      <div class="world-actions">
+        <button id="new-world-btn" class="px-btn primary">New world</button>
+        <label class="px-btn file-btn">
+          Import .rift
+          <input type="file" id="import-file" accept=".rift" hidden />
+        </label>
+      </div>
+
+      <ul id="world-list" class="world-list"></ul>
+
+      <div id="worlds-error" class="error"></div>
+    </div>
+  </section>
+
+  <!-- Game screen -->
+  <section id="game-screen" class="screen">
+    <canvas id="game-canvas" width="1280" height="720"></canvas>
+
+    <div id="hud">
+      <div class="hud-top">
+        <button id="leave-btn" class="px-btn small">Leave</button>
+        <div id="world-title" class="px-text"></div>
+        <button id="invite-btn" class="px-btn small">Invite</button>
+        <button id="export-btn" class="px-btn small">Export .rift</button>
+      </div>
+
+      <div class="hud-bottom">
+        <div id="hotbar" class="hotbar"></div>
+        <div class="hud-actions">
+          <button data-panel="inventory" class="px-btn small">Inventory</button>
+          <button data-panel="crafting" class="px-btn small">Crafting</button>
+          <button data-panel="build" class="px-btn small">Build</button>
+          <button data-panel="permissions" class="px-btn small">Permissions</button>
+        </div>
+      </div>
+
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" maxlength="200" placeholder="Press T to chat" />
+      </form>
+    </div>
+
+    <!-- Panels -->
+    <div class="panel hidden" id="panel-inventory">
+      <header><h3>Inventory</h3><button class="px-btn small close">Close</button></header>
+      <div id="inv-grid" class="inv-grid"></div>
+    </div>
+    <div class="panel hidden" id="panel-crafting">
+      <header><h3>Crafting</h3><button class="px-btn small close">Close</button></header>
+      <div id="recipe-list" class="recipe-list"></div>
+    </div>
+    <div class="panel hidden" id="panel-build">
+      <header><h3>Build</h3><button class="px-btn small close">Close</button></header>
+      <div id="build-list" class="build-list"></div>
+      <div class="hint">Select a placeable item, then click a tile in the world. Right-click to remove.</div>
+    </div>
+    <div class="panel hidden" id="panel-permissions">
+      <header><h3>Permissions</h3><button class="px-btn small close">Close</button></header>
+      <div id="perm-list" class="perm-list"></div>
+      <form id="invite-form" class="invite-form">
+        <input name="username" placeholder="Invite by username" />
+        <button class="px-btn small">Invite</button>
+      </form>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+      <div class="loading-text">Entering the Rift...</div>
+      <div class="loading-bar"><div class="loading-fill"></div></div>
+    </div>
+  </section>
+
+</div>
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
