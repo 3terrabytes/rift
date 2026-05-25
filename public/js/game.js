@@ -1,18 +1,18 @@
 import { API, Auth } from './api.js';
 import { Renderer } from './renderer.js';
 import { Network } from './network.js';
-import { generateWorld, findSpawn, isWalkable, WORLD_SIZE } from './world.js';
+import {
+  createWorld, findSpawn, isWalkable, snapshotState,
+  getNodeAt, getFeatureAt, getPlacedAt, addPlaced, removePlacedAt,
+  getTileKind,
+} from './world.js';
 
-const KEY_DIR = {
-  ArrowUp:    { dx:  0, dy: -1, dir: 'north' },
-  ArrowDown:  { dx:  0, dy:  1, dir: 'south' },
-  ArrowLeft:  { dx: -1, dy:  0, dir: 'west'  },
-  ArrowRight: { dx:  1, dy:  0, dir: 'east'  },
-  KeyW: { dx: 0, dy: -1, dir: 'north' },
-  KeyS: { dx: 0, dy:  1, dir: 'south' },
-  KeyA: { dx: -1, dy: 0, dir: 'west' },
-  KeyD: { dx: 1, dy:  0, dir: 'east' },
-};
+const HORIZ = { KeyA: -1, ArrowLeft: -1, KeyD: 1, ArrowRight: 1 };
+const VERT  = { KeyW: -1, ArrowUp:   -1, KeyS: 1, ArrowDown:  1 };
+
+const SPEED_WALK = 4.0;   // tiles/sec
+const SPEED_RUN  = 7.0;   // tiles/sec
+const MOVE_SEND_MS = 80;  // network throttle for local move broadcasts
 
 const PLACEABLES = ['planks','stone_tile','wood_door','flower_pot','lantern'];
 
@@ -21,23 +21,26 @@ export class Game {
     this.canvas = canvas;
     this.ui = ui;
     this.renderer = new Renderer(canvas);
-    this.network = new Network();
+    this.network  = new Network();
     this.world = null;
-    this.players = {};         // id -> {x,y,dir,anim,username}
-    this.localPlayer = null;   // also held in players[myId]
+    this.players = {};
+    this.localPlayer = null;
     this.myId = null;
     this.role = 'guest';
     this.worldId = null;
     this.worldMeta = null;
-    this.lastSent = { x: -1, y: -1, dir: '', anim: '' };
+    this.savedCharacter = null;
+    this.lastSent = { x: 0, y: 0, dir: '', anim: '' };
+    this.lastSentTs = 0;
     this.lastSavedAt = 0;
+    this.lastFrameTs = 0;
     this.build = { activeKey: null, cursor: null };
-    this.inventory = {};       // key -> qty
+    this.inventory = {};
     this.recipes = [];
     this.permissions = [];
     this.running = false;
     this.heldKeys = new Set();
-    this.lastStepAt = 0;
+    this._lastFootstepTs = 0;
     this._installInput();
     this._installNetwork();
   }
@@ -45,40 +48,33 @@ export class Game {
   _installInput() {
     addEventListener('keydown', (e) => {
       if (this.ui.isChatActive() && e.code !== 'Escape') return;
-      if (e.code === 'KeyT' && !this.ui.isChatActive()) {
-        this.ui.openChat();
-        e.preventDefault();
-        return;
-      }
+      if (e.code === 'KeyT' && !this.ui.isChatActive()) { this.ui.openChat(); e.preventDefault(); return; }
       if (e.code === 'Escape') { this.ui.closeAllPanels(); this.ui.closeChat(); return; }
-      if (KEY_DIR[e.code]) { this.heldKeys.add(e.code); e.preventDefault(); }
-      if (e.code === 'Space') this._interactNearest();
+      if (HORIZ[e.code] !== undefined || VERT[e.code] !== undefined) { this.heldKeys.add(e.code); e.preventDefault(); }
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.heldKeys.add('Shift');
+      if (e.code === 'Space') { this._interactNearest(); e.preventDefault(); }
     });
     addEventListener('keyup', (e) => {
       this.heldKeys.delete(e.code);
-      if (this.localPlayer && this.heldKeys.size === 0) {
-        this.localPlayer.anim = 'idle';
-      }
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.heldKeys.delete('Shift');
     });
+    addEventListener('blur', () => this.heldKeys.clear());
 
     this.canvas.addEventListener('click', (e) => this._handleClick(e, false));
     this.canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); this._handleClick(e, true); });
 
     this.canvas.addEventListener('mousemove', (e) => {
-      if (!this.build.activeKey) { this.build.cursor = null; return; }
       const rect = this.canvas.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
       const t = this.renderer.pickTile(px, py);
-      this.build.cursor = (t.x >= 0 && t.y >= 0 && t.x < WORLD_SIZE && t.y < WORLD_SIZE) ? t : null;
+      this.build.cursor = this.build.activeKey ? t : null;
     });
   }
 
   _installNetwork() {
     this.network.addEventListener('msg', (e) => this._handleMessage(e.detail));
-    this.network.addEventListener('close', () => {
-      this.ui.chatLine('Disconnected.', 'sys');
-    });
+    this.network.addEventListener('close', () => this.ui.chatLine('Disconnected.', 'sys'));
   }
 
   _handleMessage(msg) {
@@ -87,22 +83,30 @@ export class Game {
         this.myId = msg.you.id;
         this.role = msg.you.role;
         for (const p of msg.players) {
-          this.players[p.id] = { ...p, local: p.id === this.myId };
+          this.players[p.id] = { ...p, targetX: p.x, targetY: p.y, local: p.id === this.myId };
         }
-        // Reposition the local player at the saved character location, if it
-        // matches this world, otherwise at the world's safe spawn point.
         const me = this.players[this.myId] || { id: this.myId, username: msg.you.username, dir: 'south', anim: 'idle', local: true };
         const useSaved = this.savedCharacter && Number(this.savedCharacter.last_world) === Number(this.worldId);
-        if (useSaved) { me.x = this.savedCharacter.last_x; me.y = this.savedCharacter.last_y; }
-        else { const s = findSpawn(this.world); me.x = s.x; me.y = s.y; }
+        if (useSaved) {
+          me.x = Number(this.savedCharacter.last_x);
+          me.y = Number(this.savedCharacter.last_y);
+        } else {
+          const s = findSpawn(this.world, 0, 0);
+          me.x = s.x; me.y = s.y;
+        }
+        me.targetX = me.x; me.targetY = me.y;
         this.players[this.myId] = me;
         this.localPlayer = me;
         this.ui.chatLine(msg.message, 'sys');
         break;
       }
       case 'join': {
-        this.players[msg.id] = { id: msg.id, username: msg.username, x: msg.x, y: msg.y, dir: msg.dir, anim: 'idle' };
-        this.ui.chatLine(`A traveler is entering the Rift.`, 'sys');
+        this.players[msg.id] = {
+          id: msg.id, username: msg.username,
+          x: msg.x, y: msg.y, targetX: msg.x, targetY: msg.y,
+          dir: msg.dir, anim: 'idle',
+        };
+        this.ui.chatLine('A traveler is entering the Rift.', 'sys');
         break;
       }
       case 'leave': {
@@ -112,32 +116,28 @@ export class Game {
       }
       case 'move': {
         const p = this.players[msg.id];
-        if (p) { p.x = msg.x; p.y = msg.y; p.dir = msg.dir; p.anim = msg.anim; }
+        if (p) { p.targetX = msg.x; p.targetY = msg.y; p.dir = msg.dir; p.anim = msg.anim; }
         break;
       }
       case 'place': {
-        // Replace any existing object at the tile, then add new.
-        this.world.placed = this.world.placed.filter(p => !(p.x === msg.tile.x && p.y === msg.tile.y));
-        this.world.placed.push(msg.tile);
+        addPlaced(this.world, msg.tile);
         break;
       }
       case 'remove': {
-        this.world.placed = this.world.placed.filter(p => !(p.x === msg.tile.x && p.y === msg.tile.y));
+        removePlacedAt(this.world, msg.tile.x, msg.tile.y);
         break;
       }
       case 'gather': {
-        // Remove the node visually for everyone.
-        this.world.nodes = this.world.nodes.filter(n => !(n.x === msg.node.x && n.y === msg.node.y));
+        this.world.removed.add(`${msg.node.x},${msg.node.y}`);
+        this.renderer.addParticles(msg.node.x + 0.5, msg.node.y + 0.5, this._particleColor(msg.node.key));
         break;
       }
       case 'puzzle': {
-        const key = msg.key;
-        if (this.world.puzzles[key]) this.world.puzzles[key].solved = !!msg.state;
+        this.world.puzzles[msg.key] = { ...(this.world.puzzles[msg.key] || {}), solved: !!msg.state };
         break;
       }
       case 'shrine': {
-        const key = msg.key;
-        if (this.world.shrines[key]) this.world.shrines[key].active = !!msg.active;
+        this.world.shrines[msg.key] = { ...(this.world.shrines[msg.key] || {}), active: !!msg.active };
         if (msg.active) this.ui.chatLine('A shrine awakens.', 'sys');
         break;
       }
@@ -147,8 +147,7 @@ export class Game {
       }
       case 'emote': {
         const p = this.players[msg.id];
-        if (p) p.anim = 'interact';
-        setTimeout(() => { if (p) p.anim = 'idle'; }, 600);
+        if (p) { p.anim = 'interact'; setTimeout(() => { if (p) p.anim = 'idle'; }, 600); }
         break;
       }
     }
@@ -161,15 +160,7 @@ export class Game {
     this.worldMeta = world;
     this.role = role;
     this.permissions = permissions;
-    // Generate base world from seed, then apply persisted overlays.
-    const w = generateWorld(Number(world.seed));
-    if (state) {
-      if (Array.isArray(state.placed)) w.placed = state.placed;
-      if (state.puzzles && typeof state.puzzles === 'object') w.puzzles = { ...w.puzzles, ...state.puzzles };
-      if (state.shrines && typeof state.shrines === 'object') w.shrines = { ...w.shrines, ...state.shrines };
-      if (Array.isArray(state.unlocks)) w.unlocks = state.unlocks;
-    }
-    this.world = w;
+    this.world = createWorld(Number(world.seed), state || {});
     try { const { character } = await API.character(); this.savedCharacter = character; } catch {}
     await this._refreshInventory();
     await this._refreshRecipes();
@@ -197,8 +188,15 @@ export class Game {
     this.running = true;
     const loop = (ts) => {
       if (!this.running) return;
-      this._update(ts);
-      this.renderer.draw(this.world, this.players, this.localPlayer, this.build);
+      if (!this.lastFrameTs) this.lastFrameTs = ts;
+      const dt = Math.min(0.1, (ts - this.lastFrameTs) / 1000);
+      this.lastFrameTs = ts;
+      this._update(ts, dt);
+      this.renderer.draw(this.world, this.players, this.localPlayer, this.build, dt);
+      if (this.ui.minimap && this.localPlayer) {
+        this.renderer.drawMinimap(this.ui.minimap, this.world, this.localPlayer, this.players);
+      }
+      this._updateCoords();
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -212,52 +210,93 @@ export class Game {
     this.world = null;
   }
 
-  _update(ts) {
-    // Movement: tile-stepping with cooldown.
-    if (this.localPlayer && ts - this.lastStepAt > 140) {
-      let stepped = false;
-      for (const code of this.heldKeys) {
-        const dir = KEY_DIR[code];
-        if (!dir) continue;
-        const nx = this.localPlayer.x + dir.dx;
-        const ny = this.localPlayer.y + dir.dy;
-        this.localPlayer.dir = dir.dir;
-        if (isWalkable(this.world, nx, ny)) {
-          this.localPlayer.x = nx;
-          this.localPlayer.y = ny;
-          this.localPlayer.anim = 'walk';
-          stepped = true;
-          this.lastStepAt = ts;
-        }
-        break;
+  _update(ts, dt) {
+    // Local player movement (free-direction, axis-separated collision).
+    if (this.localPlayer && this.world) {
+      let dx = 0, dy = 0;
+      for (const k of this.heldKeys) {
+        if (HORIZ[k] !== undefined) dx += HORIZ[k];
+        if (VERT[k]  !== undefined) dy += VERT[k];
       }
-      if (!stepped && this.heldKeys.size === 0) this.localPlayer.anim = 'idle';
+      const running = this.heldKeys.has('Shift');
+      const speed = running ? SPEED_RUN : SPEED_WALK;
+      if (dx !== 0 || dy !== 0) {
+        const len = Math.hypot(dx, dy) || 1;
+        dx /= len; dy /= len;
+        const nx = this.localPlayer.x + dx * speed * dt;
+        const ny = this.localPlayer.y + dy * speed * dt;
+        if (this._canStand(nx, this.localPlayer.y)) this.localPlayer.x = nx;
+        if (this._canStand(this.localPlayer.x, ny)) this.localPlayer.y = ny;
+
+        this.localPlayer.anim = 'walk';
+        // 4-direction sprite from dominant motion.
+        if (Math.abs(dx) > Math.abs(dy)) this.localPlayer.dir = dx > 0 ? 'east' : 'west';
+        else                              this.localPlayer.dir = dy > 0 ? 'south' : 'north';
+
+        // Footstep dust on grass/dirt/sand at a cadence.
+        if (ts - this._lastFootstepTs > (running ? 140 : 220)) {
+          const t = getTileKind(this.world, Math.floor(this.localPlayer.x), Math.floor(this.localPlayer.y));
+          if (t === 'grass' || t === 'dirt' || t === 'sand') {
+            const c = t === 'grass' ? '#7fc25c' : t === 'sand' ? '#d6c290' : '#8a6a48';
+            this.renderer.addParticles(this.localPlayer.x, this.localPlayer.y, c, 2);
+          }
+          this._lastFootstepTs = ts;
+        }
+      } else {
+        this.localPlayer.anim = 'idle';
+      }
     }
 
-    // Network sync (only when changed).
-    if (this.localPlayer) {
+    // Smooth interpolation for remote players.
+    for (const id in this.players) {
+      const p = this.players[id];
+      if (p === this.localPlayer) continue;
+      if (p.targetX === undefined) { p.targetX = p.x; p.targetY = p.y; }
+      const k = Math.min(1, dt * 12);
+      p.x += (p.targetX - p.x) * k;
+      p.y += (p.targetY - p.y) * k;
+    }
+
+    // Throttled network sync.
+    if (this.localPlayer && ts - this.lastSentTs > MOVE_SEND_MS) {
       const p = this.localPlayer;
-      if (p.x !== this.lastSent.x || p.y !== this.lastSent.y || p.dir !== this.lastSent.dir || p.anim !== this.lastSent.anim) {
+      const moved = Math.hypot(p.x - this.lastSent.x, p.y - this.lastSent.y) > 0.04;
+      const animDirChanged = p.dir !== this.lastSent.dir || p.anim !== this.lastSent.anim;
+      if (moved || animDirChanged) {
         this.network.send({ t: 'move', x: p.x, y: p.y, dir: p.dir, anim: p.anim });
         this.lastSent = { x: p.x, y: p.y, dir: p.dir, anim: p.anim };
+        this.lastSentTs = ts;
       }
     }
 
-    // Auto-save every 20 seconds.
+    // Auto-save every 20 s.
     if (this.localPlayer && ts - this.lastSavedAt > 20000) {
       this.lastSavedAt = ts;
       this._save().catch(() => {});
     }
   }
 
+  _canStand(x, y) {
+    // Player occupies a 0.6 box - check the 4 corners for collision.
+    const r = 0.3;
+    return isWalkable(this.world, x - r, y - r)
+        && isWalkable(this.world, x + r, y - r)
+        && isWalkable(this.world, x - r, y + r)
+        && isWalkable(this.world, x + r, y + r);
+  }
+
+  _updateCoords() {
+    if (this.ui.coordsEl && this.localPlayer) {
+      const x = Math.round(this.localPlayer.x);
+      const y = Math.round(this.localPlayer.y);
+      const t = getTileKind(this.world, x, y);
+      this.ui.coordsEl.textContent = `(${x}, ${y})  ${t}`;
+    }
+  }
+
   async _save() {
     if (!this.worldId || !this.world) return;
-    await API.saveWorld(this.worldId, {
-      placed: this.world.placed,
-      puzzles: this.world.puzzles,
-      shrines: this.world.shrines,
-      unlocks: this.world.unlocks,
-    });
+    await API.saveWorld(this.worldId, snapshotState(this.world));
     if (this.localPlayer) {
       await API.saveCharacter({
         last_x: this.localPlayer.x,
@@ -275,7 +314,6 @@ export class Game {
     this.ui.renderHotbar(this.inventory);
     this._renderBuildList();
   }
-
   _renderBuildList() {
     this.ui.renderBuildList(PLACEABLES, this.inventory, this.build.activeKey, (key) => {
       this.build.activeKey = (this.build.activeKey === key) ? null : key;
@@ -297,51 +335,66 @@ export class Game {
     });
   }
 
+  _particleColor(key) {
+    return ({
+      tree: '#5ea142', plant: '#7fc25c', rock: '#a1a8b6',
+      mineral: '#d4b25a', crystal: '#8ed8ff',
+    })[key] || '#caa07a';
+  }
+
   async _interactNearest() {
-    if (!this.localPlayer) return;
-    const px = this.localPlayer.x, py = this.localPlayer.y;
-    // Search adjacent tiles + current tile.
+    if (!this.localPlayer || !this.world) return;
+    const px = Math.floor(this.localPlayer.x);
+    const py = Math.floor(this.localPlayer.y);
+    // Search current tile + 8 neighbours, sort by distance.
+    const candidates = [];
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
         const tx = px + dx, ty = py + dy;
-        // Gather node?
-        const node = this.world.nodes.find(n => n.x === tx && n.y === ty);
-        if (node) {
-          await API.addInv(node.resource, 1);
-          this.network.send({ t: 'gather', node });
-          this.world.nodes = this.world.nodes.filter(n => !(n.x === tx && n.y === ty));
+        const dist = Math.hypot(tx + 0.5 - this.localPlayer.x, ty + 0.5 - this.localPlayer.y);
+        candidates.push({ tx, ty, dist });
+      }
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    for (const { tx, ty } of candidates) {
+      const node = getNodeAt(this.world, tx, ty);
+      if (node) {
+        await API.addInv(node.resource, 1);
+        this.world.removed.add(`${tx},${ty}`);
+        this.network.send({ t: 'gather', node });
+        this.renderer.addParticles(tx + 0.5, ty + 0.5, this._particleColor(node.key));
+        this.localPlayer.anim = 'interact';
+        this.network.send({ t: 'emote', emote: 'gather' });
+        setTimeout(() => { if (this.localPlayer) this.localPlayer.anim = 'idle'; }, 280);
+        await this._refreshInventory();
+        this.ui.chatLine(`Gathered ${node.resource}.`, 'sys');
+        return;
+      }
+      const sKey = `${tx},${ty}`;
+      const feat = getFeatureAt(this.world, tx, ty);
+      if (feat && feat.kind === 'shrine') {
+        const cur = this.world.shrines[sKey] || {};
+        if (cur.active) { this.ui.chatLine('The shrine glows softly.', 'sys'); return; }
+        if ((this.inventory.rune_key || 0) > 0) {
+          await API.consumeInv('rune_key', 1);
+          this.world.shrines[sKey] = { active: true };
+          this.network.send({ t: 'shrine', key: sKey, active: true });
+          if (!this.world.unlocks.includes('shrine_' + sKey)) this.world.unlocks.push('shrine_' + sKey);
+          this.renderer.addParticles(tx + 0.5, ty + 0.5, '#ffd479', 20);
           await this._refreshInventory();
-          this.localPlayer.anim = 'interact';
-          this.network.send({ t: 'emote', emote: 'gather' });
-          setTimeout(() => { if (this.localPlayer) this.localPlayer.anim = 'idle'; }, 300);
-          this.ui.chatLine(`Gathered ${node.resource}.`, 'sys');
-          return;
+          this.ui.chatLine('You activate the shrine.', 'sys');
+        } else {
+          this.ui.chatLine('A shrine. It needs a Rune Key.', 'sys');
         }
-        // Shrine?
-        const sKey = `${tx},${ty}`;
-        if (this.world.shrines[sKey]) {
-          const sh = this.world.shrines[sKey];
-          if (sh.active) { this.ui.chatLine('The shrine glows softly.', 'sys'); return; }
-          if ((this.inventory.rune_key || 0) > 0) {
-            await API.consumeInv('rune_key', 1);
-            sh.active = true;
-            this.network.send({ t: 'shrine', key: sKey, active: true });
-            if (!this.world.unlocks.includes('shrine_' + sKey)) this.world.unlocks.push('shrine_' + sKey);
-            await this._refreshInventory();
-            this.ui.chatLine('You activate the shrine.', 'sys');
-          } else {
-            this.ui.chatLine('A shrine. It needs a Rune Key.', 'sys');
-          }
-          return;
-        }
-        // Puzzle (toggle pressure plate / switch)?
-        if (this.world.puzzles[sKey]) {
-          const pz = this.world.puzzles[sKey];
-          pz.solved = !pz.solved;
-          this.network.send({ t: 'puzzle', key: sKey, state: pz.solved });
-          this.ui.chatLine(pz.solved ? 'Click.' : 'Reset.', 'sys');
-          return;
-        }
+        return;
+      }
+      if (feat && feat.kind === 'puzzle') {
+        const cur = this.world.puzzles[sKey] || {};
+        const newState = !cur.solved;
+        this.world.puzzles[sKey] = { solved: newState };
+        this.network.send({ t: 'puzzle', key: sKey, state: newState });
+        this.ui.chatLine(newState ? 'Click.' : 'Reset.', 'sys');
+        return;
       }
     }
     this.ui.chatLine('Nothing here.', 'sys');
@@ -353,13 +406,11 @@ export class Game {
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     const t = this.renderer.pickTile(px, py);
-    if (t.x < 0 || t.y < 0 || t.x >= WORLD_SIZE || t.y >= WORLD_SIZE) return;
 
     if (isRight) {
-      // Remove the placed object on this tile (if any) and return material.
-      const placed = this.world.placed.find(p => p.x === t.x && p.y === t.y);
+      const placed = getPlacedAt(this.world, t.x, t.y);
       if (placed) {
-        this.world.placed = this.world.placed.filter(p => p !== placed);
+        removePlacedAt(this.world, t.x, t.y);
         this.network.send({ t: 'remove', tile: { x: t.x, y: t.y } });
         API.addInv(placed.key, 1).then(() => this._refreshInventory());
         this.ui.chatLine(`Picked up ${placed.key}.`, 'sys');
@@ -372,14 +423,11 @@ export class Game {
         this.ui.chatLine(`No ${this.build.activeKey} in inventory.`, 'sys');
         return;
       }
-      // Block if walkable check would be off-grid; allow placing on top of any tile.
       const tile = { x: t.x, y: t.y, key: this.build.activeKey };
-      this.world.placed = this.world.placed.filter(p => !(p.x === t.x && p.y === t.y));
-      this.world.placed.push(tile);
+      addPlaced(this.world, tile);
       this.network.send({ t: 'place', tile });
       API.consumeInv(this.build.activeKey, 1).then(() => this._refreshInventory());
       this.ui.chatLine(`Placed ${this.build.activeKey}.`, 'sys');
-      return;
     }
   }
 
@@ -390,6 +438,7 @@ export class Game {
   }
 
   async exportRift() {
+    await this._save().catch(() => {});
     const blob = await API.exportRift(this.worldId);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

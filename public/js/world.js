@@ -1,149 +1,171 @@
-// Deterministic procedural world generation from a seed.
-// World is a 32x32 tile grid of biomes with scattered objects, puzzles, shrines.
+// Infinite, deterministic world. Terrain, gather nodes, and special features
+// are computed from (seed, x, y) on demand. Only overlays (placed objects,
+// gathered nodes, activated shrines, solved puzzles) are persisted.
 
-export const WORLD_SIZE = 32;
+function hash32(seed, x, y, salt = 0) {
+  let h = (seed >>> 0) ^ (salt | 0);
+  h = Math.imul(h ^ (x | 0), 0x85EBCA6B);
+  h ^= h >>> 13;
+  h = Math.imul(h ^ (y | 0), 0xC2B2AE35);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
 
-// Mulberry32 PRNG
-function rng(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+function unit(seed, x, y, salt) {
+  return hash32(seed, x, y, salt) / 4294967295;
+}
+
+// Bilinear-interpolated value noise.
+function valueNoise(seed, x, y, salt) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const sx = x - x0, sy = y - y0;
+  const n00 = unit(seed, x0,     y0,     salt);
+  const n10 = unit(seed, x0 + 1, y0,     salt);
+  const n01 = unit(seed, x0,     y0 + 1, salt);
+  const n11 = unit(seed, x0 + 1, y0 + 1, salt);
+  // Smoothstep
+  const tx = sx * sx * (3 - 2 * sx);
+  const ty = sy * sy * (3 - 2 * sy);
+  return (n00 * (1 - tx) + n10 * tx) * (1 - ty)
+       + (n01 * (1 - tx) + n11 * tx) * ty;
+}
+
+function fractalNoise(seed, x, y, salt) {
+  const scale = 1 / 12;
+  let v = 0, amp = 1, total = 0;
+  for (let o = 0; o < 4; o++) {
+    const s = scale * (1 << o);
+    v += valueNoise(seed, x * s, y * s, salt + o * 1009) * amp;
+    total += amp;
+    amp *= 0.55;
+  }
+  return v / total;
+}
+
+// Create a world handle. Holds the seed and any persisted overlays.
+export function createWorld(seed, overlays = {}) {
+  return {
+    seed: seed >>> 0,
+    // Overlays loaded from world_state:
+    placed:        Array.isArray(overlays.placed)  ? overlays.placed  : [],
+    shrines:       (overlays.shrines  && typeof overlays.shrines  === 'object') ? overlays.shrines  : {},
+    puzzles:       (overlays.puzzles  && typeof overlays.puzzles  === 'object') ? overlays.puzzles  : {},
+    unlocks:       Array.isArray(overlays.unlocks) ? overlays.unlocks : [],
+    // Gathered node positions (Set of "x,y"). Stored as array in world_state.removed_nodes.
+    removed:       new Set(Array.isArray(overlays.removed_nodes) ? overlays.removed_nodes : []),
   };
 }
 
-function valueNoise2(rnd, size) {
-  const grid = new Float32Array(size * size);
-  for (let i = 0; i < grid.length; i++) grid[i] = rnd();
-  // smooth
-  const out = new Float32Array(size * size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      let sum = 0, n = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx >= 0 && nx < size && ny >= 0 && ny < size) {
-            sum += grid[ny * size + nx]; n++;
-          }
-        }
-      }
-      out[y * size + x] = sum / n;
-    }
-  }
-  return out;
+// Lookup overlay for placed/removed at a tile (fast index for hot paths).
+function rebuildPlacedIndex(world) {
+  world._placedIdx = new Map();
+  for (const p of world.placed) world._placedIdx.set(`${p.x},${p.y}`, p);
+}
+export function getPlacedAt(world, x, y) {
+  if (!world._placedIdx) rebuildPlacedIndex(world);
+  return world._placedIdx.get(`${x},${y}`) || null;
+}
+export function addPlaced(world, tile) {
+  removePlacedAt(world, tile.x, tile.y);
+  world.placed.push(tile);
+  if (!world._placedIdx) rebuildPlacedIndex(world);
+  else world._placedIdx.set(`${tile.x},${tile.y}`, tile);
+}
+export function removePlacedAt(world, x, y) {
+  world.placed = world.placed.filter(p => !(p.x === x && p.y === y));
+  if (world._placedIdx) world._placedIdx.delete(`${x},${y}`);
 }
 
-export function generateWorld(seed) {
-  const rnd = rng(seed || 1);
-  const size = WORLD_SIZE;
-  const elev = valueNoise2(rnd, size);
-  const moist = valueNoise2(rnd, size);
+// --- terrain ---
 
-  const terrain = {}; // key "x,y" -> tile kind
-  const nodes = [];   // gatherable nodes
-  const puzzles = {};
-  const shrines = {};
+const BIOMES = ['water', 'sand', 'grass', 'dirt', 'stone', 'cave', 'ruin'];
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = y * size + x;
-      const e = elev[i], m = moist[i];
-      let kind;
-      if (e < 0.32) kind = 'water';
-      else if (e < 0.38) kind = 'sand';
-      else if (e > 0.78) kind = 'stone';
-      else if (e > 0.7)  kind = m > 0.5 ? 'stone' : 'dirt';
-      else kind = m > 0.4 ? 'grass' : 'dirt';
-      terrain[`${x},${y}`] = kind;
-    }
-  }
+export function getTileKind(world, x, y) {
+  const e = fractalNoise(world.seed, x, y, 1);
+  const m = fractalNoise(world.seed, x, y, 7777);
+  const c = fractalNoise(world.seed, x, y, 9999); // cave/ruin overlay
 
-  // Cave / ruin patches
-  for (let i = 0; i < 8; i++) {
-    const cx = Math.floor(rnd() * size);
-    const cy = Math.floor(rnd() * size);
-    const kind = rnd() < 0.5 ? 'cave' : 'ruin';
-    const r = 2 + Math.floor(rnd() * 3);
-    for (let y = cy - r; y <= cy + r; y++) {
-      for (let x = cx - r; x <= cx + r; x++) {
-        if (x < 0 || x >= size || y < 0 || y >= size) continue;
-        const d = Math.hypot(x - cx, y - cy);
-        if (d <= r && rnd() < 0.7) terrain[`${x},${y}`] = kind;
-      }
-    }
-  }
+  // Cave patches in low-cave-noise zones with non-water elevation.
+  if (e > 0.38 && c < 0.28) return 'cave';
+  if (e > 0.38 && c > 0.72) return 'ruin';
 
-  // Scatter gather nodes
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const t = terrain[`${x},${y}`];
-      const r = rnd();
-      if (t === 'grass' && r < 0.06) nodes.push({ x, y, key: 'tree', resource: 'wood' });
-      else if (t === 'grass' && r < 0.12) nodes.push({ x, y, key: 'plant', resource: 'plant' });
-      else if (t === 'stone' && r < 0.18) nodes.push({ x, y, key: 'rock', resource: 'stone' });
-      else if (t === 'stone' && r < 0.23) nodes.push({ x, y, key: 'mineral', resource: 'mineral' });
-      else if (t === 'cave' && r < 0.18) nodes.push({ x, y, key: 'crystal', resource: 'crystal' });
-      else if (t === 'ruin' && r < 0.08) nodes.push({ x, y, key: 'mineral', resource: 'mineral' });
-    }
-  }
-
-  // Shrines (3)
-  for (let i = 0; i < 3; i++) {
-    let placed = false;
-    for (let attempt = 0; attempt < 40 && !placed; attempt++) {
-      const x = Math.floor(rnd() * size);
-      const y = Math.floor(rnd() * size);
-      const t = terrain[`${x},${y}`];
-      if (t === 'ruin' || t === 'grass') {
-        shrines[`${x},${y}`] = { active: false, needs: 'rune_key' };
-        placed = true;
-      }
-    }
-  }
-
-  // Puzzles: a pressure plate + a switch in caves
-  for (let i = 0; i < 2; i++) {
-    let placed = 0;
-    for (let attempt = 0; attempt < 60 && placed < 2; attempt++) {
-      const x = Math.floor(rnd() * size);
-      const y = Math.floor(rnd() * size);
-      if (terrain[`${x},${y}`] === 'cave') {
-        puzzles[`${x},${y}`] = { kind: placed === 0 ? 'pressure_plate' : 'switch', solved: false };
-        placed++;
-      }
-    }
-  }
-
-  return { size, terrain, nodes, puzzles, shrines, placed: [], unlocks: [], seed };
+  if (e < 0.30) return 'water';
+  if (e < 0.36) return 'sand';
+  if (e > 0.74) return 'stone';
+  if (e > 0.66) return m > 0.5 ? 'stone' : 'dirt';
+  return m > 0.4 ? 'grass' : 'dirt';
 }
 
-// Find a safe spawn (grass tile near center).
-export function findSpawn(world) {
-  const s = world.size;
-  const cx = Math.floor(s / 2), cy = Math.floor(s / 2);
-  for (let r = 0; r < s; r++) {
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const x = cx + dx, y = cy + dy;
-        if (x < 0 || x >= s || y < 0 || y >= s) continue;
-        const t = world.terrain[`${x},${y}`];
-        if (t === 'grass' || t === 'dirt' || t === 'sand') return { x, y };
-      }
-    }
+// --- gather nodes (deterministic + overlay for removed) ---
+
+export function getNodeAt(world, x, y) {
+  if (world.removed.has(`${x},${y}`)) return null;
+  if (getPlacedAt(world, x, y)) return null; // built object takes priority
+  const t = getTileKind(world, x, y);
+  const h = unit(world.seed, x, y, 31337);
+  if (t === 'grass' && h < 0.05) return { x, y, key: 'tree',     resource: 'wood' };
+  if (t === 'grass' && h < 0.10) return { x, y, key: 'plant',    resource: 'plant' };
+  if (t === 'dirt'  && h < 0.04) return { x, y, key: 'plant',    resource: 'plant' };
+  if (t === 'stone' && h < 0.14) return { x, y, key: 'rock',     resource: 'stone' };
+  if (t === 'stone' && h < 0.18) return { x, y, key: 'mineral',  resource: 'mineral' };
+  if (t === 'cave'  && h < 0.18) return { x, y, key: 'crystal',  resource: 'crystal' };
+  if (t === 'ruin'  && h < 0.08) return { x, y, key: 'mineral',  resource: 'mineral' };
+  return null;
+}
+
+// --- special features (shrines + puzzles), sparse, deterministic ---
+
+export function getFeatureAt(world, x, y) {
+  const t = getTileKind(world, x, y);
+  if (t === 'water') return null;
+  if (getPlacedAt(world, x, y)) return null;
+  const h = unit(world.seed, x, y, 8675309);
+  // Shrines: ~1 per 1500 tiles, prefer ruins + grass.
+  if (h < 0.00065 && (t === 'ruin' || t === 'grass')) {
+    return { kind: 'shrine', x, y };
   }
-  return { x: cx, y: cy };
+  // Puzzles: ~1 per 1000 tiles, mostly in caves.
+  if (h > 0.997 && (t === 'cave' || t === 'ruin')) {
+    const sub = unit(world.seed, x, y, 100001) < 0.5 ? 'switch' : 'pressure_plate';
+    return { kind: 'puzzle', subkind: sub, x, y };
+  }
+  return null;
 }
 
 export function isWalkable(world, x, y) {
-  if (x < 0 || y < 0 || x >= world.size || y >= world.size) return false;
-  const t = world.terrain[`${x},${y}`];
-  if (t === 'water') return false;
-  // Solid objects (trees, rocks, doors) block movement.
-  for (const p of world.placed) {
-    if (p.x === x && p.y === y && (p.key === 'wood_door' || p.key === 'tree' || p.key === 'rock')) return false;
-  }
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (getTileKind(world, ix, iy) === 'water') return false;
+  const p = getPlacedAt(world, ix, iy);
+  if (p && (p.key === 'wood_door' || p.key === 'tree' || p.key === 'rock')) return false;
+  const n = getNodeAt(world, ix, iy);
+  if (n && (n.key === 'tree' || n.key === 'rock')) return false;
   return true;
+}
+
+// Find a safe spawn near (cx, cy). Walks outward until a walkable tile is found.
+export function findSpawn(world, cx = 0, cy = 0) {
+  for (let r = 0; r < 200; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        const x = cx + dx, y = cy + dy;
+        const t = getTileKind(world, x, y);
+        if (t === 'grass' || t === 'dirt' || t === 'sand') {
+          if (!getNodeAt(world, x, y)) return { x: x + 0.5, y: y + 0.5 };
+        }
+      }
+    }
+  }
+  return { x: cx + 0.5, y: cy + 0.5 };
+}
+
+// Snapshot the small mutable parts of the world for save/export.
+export function snapshotState(world) {
+  return {
+    placed:        world.placed,
+    shrines:       world.shrines,
+    puzzles:       world.puzzles,
+    unlocks:       world.unlocks,
+    removed_nodes: [...world.removed],
+  };
 }

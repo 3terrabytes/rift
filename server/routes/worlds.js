@@ -51,7 +51,7 @@ router.get('/:id', async (req, res) => {
   const role = await getPermission(id, uid);
   if (!role) return res.status(403).json({ error: 'no access' });
   const worldRows = await sql`SELECT id, name, seed, owner_id, created_at, updated_at FROM worlds WHERE id = ${id}`;
-  const stateRows = await sql`SELECT terrain, placed, puzzles, shrines, unlocks FROM world_state WHERE world_id = ${id}`;
+  const stateRows = await sql`SELECT terrain, placed, puzzles, shrines, unlocks, removed_nodes FROM world_state WHERE world_id = ${id}`;
   const permRows = await sql`
     SELECT u.id AS user_id, u.username, p.role
     FROM world_permissions p JOIN users u ON u.id = p.user_id
@@ -59,7 +59,7 @@ router.get('/:id', async (req, res) => {
   `;
   res.json({
     world: worldRows[0],
-    state: stateRows[0] || { terrain: {}, placed: [], puzzles: {}, shrines: {}, unlocks: [] },
+    state: stateRows[0] || { terrain: {}, placed: [], puzzles: {}, shrines: {}, unlocks: [], removed_nodes: [] },
     permissions: permRows,
     role
   });
@@ -71,14 +71,15 @@ router.put('/:id/state', async (req, res) => {
   const id = Number(req.params.id);
   const role = await getPermission(id, uid);
   if (!role) return res.status(403).json({ error: 'no access' });
-  const { terrain, placed, puzzles, shrines, unlocks } = req.body || {};
+  const { terrain, placed, puzzles, shrines, unlocks, removed_nodes } = req.body || {};
   // Ensure row exists.
   await sql`INSERT INTO world_state (world_id) VALUES (${id}) ON CONFLICT DO NOTHING`;
-  if (terrain !== undefined) await sql`UPDATE world_state SET terrain = ${JSON.stringify(terrain)}::jsonb WHERE world_id = ${id}`;
-  if (placed  !== undefined) await sql`UPDATE world_state SET placed  = ${JSON.stringify(placed)}::jsonb  WHERE world_id = ${id}`;
-  if (puzzles !== undefined) await sql`UPDATE world_state SET puzzles = ${JSON.stringify(puzzles)}::jsonb WHERE world_id = ${id}`;
-  if (shrines !== undefined) await sql`UPDATE world_state SET shrines = ${JSON.stringify(shrines)}::jsonb WHERE world_id = ${id}`;
-  if (unlocks !== undefined) await sql`UPDATE world_state SET unlocks = ${JSON.stringify(unlocks)}::jsonb WHERE world_id = ${id}`;
+  if (terrain !== undefined)       await sql`UPDATE world_state SET terrain       = ${JSON.stringify(terrain)}::jsonb       WHERE world_id = ${id}`;
+  if (placed  !== undefined)       await sql`UPDATE world_state SET placed        = ${JSON.stringify(placed)}::jsonb        WHERE world_id = ${id}`;
+  if (puzzles !== undefined)       await sql`UPDATE world_state SET puzzles       = ${JSON.stringify(puzzles)}::jsonb       WHERE world_id = ${id}`;
+  if (shrines !== undefined)       await sql`UPDATE world_state SET shrines       = ${JSON.stringify(shrines)}::jsonb       WHERE world_id = ${id}`;
+  if (unlocks !== undefined)       await sql`UPDATE world_state SET unlocks       = ${JSON.stringify(unlocks)}::jsonb       WHERE world_id = ${id}`;
+  if (removed_nodes !== undefined) await sql`UPDATE world_state SET removed_nodes = ${JSON.stringify(removed_nodes)}::jsonb WHERE world_id = ${id}`;
   await sql`UPDATE world_state SET updated_at = NOW() WHERE world_id = ${id}`;
   await sql`UPDATE worlds SET updated_at = NOW() WHERE id = ${id}`;
   res.json({ ok: true });

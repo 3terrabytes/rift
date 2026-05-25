@@ -15,6 +15,8 @@ export class UI {
     this.chatForm       = document.getElementById('chat-form');
     this.chatInput      = document.getElementById('chat-input');
     this.worldTitle     = document.getElementById('world-title');
+    this.minimap        = document.getElementById('minimap');
+    this.coordsEl       = document.getElementById('coords');
     this._buildCallback = () => {};
   }
 

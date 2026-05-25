@@ -160,6 +160,36 @@ button, input { font-family: var(--pixel); }
 
 .hud-actions { display: flex; gap: 6px; }
 
+.hud-side {
+  position: absolute;
+  top: 60px; right: 14px;
+  display: flex; flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+#minimap {
+  background: #0a0d15;
+  border: 2px solid var(--border-strong);
+  image-rendering: pixelated;
+  width: 180px; height: 180px;
+}
+.coords {
+  background: var(--bg-panel);
+  border: 2px solid var(--border-strong);
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--ink);
+  text-transform: lowercase;
+}
+.controls-hint {
+  background: rgba(13, 17, 26, 0.7);
+  border-left: 2px solid var(--accent);
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--ink-dim);
+  line-height: 1.6;
+}
+
 .chat-log {
   position: absolute; bottom: 110px; left: 14px;
   width: 320px; max-height: 160px; overflow: hidden;
